@@ -1,7 +1,8 @@
-OpenMW
+OpenMW-VK
 ======
 
 OpenMW is an open-source open-world RPG game engine that supports playing Morrowind by Bethesda Softworks. You need to own the game for OpenMW to play Morrowind.
+Rewrite using Vulkan as a Graphics API to make the game faster and be able to have more beautiful graphics. 
 
 OpenMW also comes with OpenMW-CS, a replacement for Bethesda's Construction Set.
 
