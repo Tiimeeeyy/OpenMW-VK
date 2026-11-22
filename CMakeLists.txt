@@ -55,6 +55,7 @@ option(BUILD_NAVMESHTOOL        "Build navmesh tool" ON)
 option(BUILD_BULLETOBJECTTOOL   "Build Bullet object tool" ON)
 option(BUILD_OPENCS_TESTS       "Build OpenMW Construction Set tests" OFF)
 option(BUILD_OPENMW_TESTS       "Build OpenMW tests" OFF)
+option(OPENMW_EXPERIMENTAL_VULKAN "Build experimental raw Vulkan renderer" OFF)
 option(PRECOMPILE_HEADERS_WITH_MSVC "Precompile most common used headers with MSVC (alternative to ccache)" ON)
 
 set(OpenGL_GL_PREFERENCE LEGACY)  # Use LEGACY as we use GL2; GLNVD is for GL3 and up.
@@ -814,6 +815,12 @@ endif()
 
 if (BUILD_OPENMW_TESTS)
     add_subdirectory(apps/openmw_tests)
+endif()
+
+if (OPENMW_EXPERIMENTAL_VULKAN)
+    find_package(Vulkan REQUIRED)
+    add_subdirectory(components/vkrender)
+    add_subdirectory(apps/vkviewer)
 endif()
 
 if (WIN32)

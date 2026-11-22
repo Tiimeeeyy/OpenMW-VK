@@ -1,0 +1,28 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2DMS gMsaaDepth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D gOutDepth;
+
+layout(push_constant) uniform ResolvePC
+{
+    uint width;
+    uint height;
+    uint sampleCount;
+} pc;
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height))
+        return;
+
+    float minDepth = 1.0;
+    for (int s = 0; s < int(pc.sampleCount); ++s)
+    {
+        float d = texelFetch(gMsaaDepth, coord, s).r;
+        minDepth = min(minDepth, d);
+    }
+    imageStore(gOutDepth, coord, vec4(minDepth, 0.0, 0.0, 0.0));
+}

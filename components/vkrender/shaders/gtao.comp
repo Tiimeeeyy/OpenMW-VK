@@ -1,0 +1,133 @@
+#version 450
+
+// Compute Ground-Truth Ambient Occlusion (GTAO) from resolved D32_SFLOAT depth
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform FrameData
+{
+    mat4 view;
+    mat4 proj;
+    mat4 viewProj;
+    mat4 invProj;
+    mat4 cascadeViewProj[3];
+    vec4 cascadeSplits;
+    vec4 cameraPos;    // w = time
+    vec4 sunDir;       // w = shadowBias
+    vec4 sunColor;     // w = intensity
+    vec4 ambientColor; // w = groundAmbientScale
+    vec4 fogColor;     // w = fogStart
+    vec4 fogParams;    // x = fogEnd, y = pointLightCount, z = maxDrawDistance, w = shadowEnabled
+    vec4 screenParams; // x = width, y = height, z = tileCountX, w = tileCountY
+    vec4 visualParams; // x = skyEnabled, y = gtaoEnabled, z = bloomEnabled, w = toneMapEnabled
+    vec4 frustumPlanes[6];
+} frame;
+
+layout(set = 1, binding = 0) uniform sampler2D gDepth;
+layout(set = 1, binding = 1, r8) uniform writeonly image2D gOutAO;
+
+vec3 viewPosFromDepth(vec2 uv, float depth)
+{
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 clip = vec4(ndc, depth, 1.0);
+    vec4 v = frame.invProj * clip;
+    return v.xyz / v.w;
+}
+
+float hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(gOutAO);
+    if (coord.x >= size.x || coord.y >= size.y)
+        return;
+
+    if (frame.visualParams.y < 0.5)
+    {
+        imageStore(gOutAO, coord, vec4(1.0));
+        return;
+    }
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size);
+    float depth = texture(gDepth, uv).r;
+    if (depth >= 0.99995)
+    {
+        imageStore(gOutAO, coord, vec4(1.0));
+        return;
+    }
+
+    vec3 pos = viewPosFromDepth(uv, depth);
+    vec2 texel = 1.0 / vec2(size);
+
+    // Reconstruct view-space normal from closest depth neighbors
+    vec3 posR = viewPosFromDepth(uv + vec2(texel.x, 0.0), texture(gDepth, uv + vec2(texel.x, 0.0)).r);
+    vec3 posL = viewPosFromDepth(uv - vec2(texel.x, 0.0), texture(gDepth, uv - vec2(texel.x, 0.0)).r);
+    vec3 posU = viewPosFromDepth(uv - vec2(0.0, texel.y), texture(gDepth, uv - vec2(0.0, texel.y)).r);
+    vec3 posD = viewPosFromDepth(uv + vec2(0.0, texel.y), texture(gDepth, uv + vec2(0.0, texel.y)).r);
+
+    vec3 ddx = (abs(posR.z - pos.z) < abs(posL.z - pos.z)) ? (posR - pos) : (pos - posL);
+    vec3 ddy = (abs(posD.z - pos.z) < abs(posU.z - pos.z)) ? (posD - pos) : (pos - posU);
+    vec3 normal = normalize(cross(ddy, ddx));
+    vec3 viewDir = normalize(-pos);
+
+    float worldRadius = 48.0; // Morrowind units (~0.75m)
+    float screenRadius = clamp((worldRadius * frame.proj[0][0]) / max(-pos.z, 1.0), 0.004, 0.06);
+
+    float rotAngle = hash12(vec2(coord)) * 3.14159265;
+    float occ = 0.0;
+    const int NUM_DIRS = 4;
+    const int NUM_STEPS = 4;
+
+    for (int d = 0; d < NUM_DIRS; ++d)
+    {
+        float angle = rotAngle + float(d) * (3.14159265 / float(NUM_DIRS));
+        vec2 dir = vec2(cos(angle), sin(angle)) * screenRadius;
+
+        float maxCos1 = -1.0;
+        float maxCos2 = -1.0;
+
+        for (int s = 1; s <= NUM_STEPS; ++s)
+        {
+            float frac = (float(s) - 0.25) / float(NUM_STEPS);
+            vec2 off = dir * frac;
+
+            vec2 uv1 = uv + off;
+            if (uv1.x > 0.0 && uv1.x < 1.0 && uv1.y > 0.0 && uv1.y < 1.0)
+            {
+                float d1 = texture(gDepth, uv1).r;
+                vec3 v1 = viewPosFromDepth(uv1, d1) - pos;
+                float len1 = length(v1);
+                if (len1 > 0.5 && len1 < worldRadius * 1.5)
+                {
+                    float falloff = clamp(1.0 - len1 / (worldRadius * 1.5), 0.0, 1.0);
+                    float c = dot(v1 / len1, normal);
+                    maxCos1 = max(maxCos1, c * falloff);
+                }
+            }
+
+            vec2 uv2 = uv - off;
+            if (uv2.x > 0.0 && uv2.x < 1.0 && uv2.y > 0.0 && uv2.y < 1.0)
+            {
+                float d2 = texture(gDepth, uv2).r;
+                vec3 v2 = viewPosFromDepth(uv2, d2) - pos;
+                float len2 = length(v2);
+                if (len2 > 0.5 && len2 < worldRadius * 1.5)
+                {
+                    float falloff = clamp(1.0 - len2 / (worldRadius * 1.5), 0.0, 1.0);
+                    float c = dot(v2 / len2, normal);
+                    maxCos2 = max(maxCos2, c * falloff);
+                }
+            }
+        }
+
+        occ += max(maxCos1, 0.0) + max(maxCos2, 0.0);
+    }
+
+    float ao = clamp(1.0 - (occ / float(NUM_DIRS * 2)) * 0.9, 0.15, 1.0);
+    imageStore(gOutAO, coord, vec4(ao, 0.0, 0.0, 0.0));
+}

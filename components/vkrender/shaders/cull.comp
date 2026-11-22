@@ -1,0 +1,135 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct InstanceData
+{
+    mat4 model;
+    vec4 boundsSphere;
+    uint firstIndex;
+    uint indexCount;
+    int vertexOffset;
+    uint materialId;
+    uint boneOffset;
+    uint flags;
+    uint pad0;
+    uint pad1;
+};
+
+struct DrawIndexedIndirectCommand
+{
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+layout(set = 0, binding = 0) uniform FrameData
+{
+    mat4 view;
+    mat4 proj;
+    mat4 viewProj;
+    mat4 invProj;
+    mat4 cascadeViewProj[3];
+    vec4 cascadeSplits;
+    vec4 cameraPos;
+    vec4 sunDir;
+    vec4 sunColor;
+    vec4 ambientColor;
+    vec4 fogColor;
+    vec4 fogParams;
+    vec4 screenParams;
+    vec4 visualParams;
+    vec4 frustumPlanes[6];
+} frame;
+
+layout(std430, set = 0, binding = 2) readonly buffer InstanceBuffer
+{
+    InstanceData instances[];
+};
+
+layout(std430, set = 1, binding = 0) writeonly buffer OpaqueIndirectBuffer
+{
+    DrawIndexedIndirectCommand opaqueCommands[];
+};
+
+layout(std430, set = 1, binding = 1) buffer OpaqueDrawCountBuffer
+{
+    uint opaqueDrawCount;
+};
+
+layout(std430, set = 1, binding = 2) writeonly buffer TransparentIndirectBuffer
+{
+    DrawIndexedIndirectCommand transparentCommands[];
+};
+
+layout(std430, set = 1, binding = 3) buffer TransparentDrawCountBuffer
+{
+    uint transparentDrawCount;
+};
+
+layout(push_constant) uniform CullPushConstants
+{
+    uint instanceCount;
+    uint enableFrustumCull;
+    uint opaqueOnly;
+} pc;
+
+bool isVisible(vec4 sphere)
+{
+    if (pc.enableFrustumCull == 0u)
+        return true;
+
+    float maxDist = frame.fogParams.z;
+    if (maxDist > 0.0)
+    {
+        float dist = length(sphere.xyz - frame.cameraPos.xyz) - sphere.w;
+        if (dist > maxDist)
+            return false;
+    }
+
+    for (int i = 0; i < 6; ++i)
+    {
+        if (dot(frame.frustumPlanes[i].xyz, sphere.xyz) + frame.frustumPlanes[i].w < -sphere.w)
+            return false;
+    }
+    return true;
+}
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.instanceCount)
+        return;
+
+    InstanceData inst = instances[idx];
+    if (inst.indexCount == 0u)
+        return;
+
+    bool isTransparent = (inst.flags & 1u) != 0u;
+    if (pc.opaqueOnly != 0u && isTransparent)
+        return;
+
+    if (!isVisible(inst.boundsSphere))
+        return;
+
+    if (isTransparent)
+    {
+        uint outSlot = atomicAdd(transparentDrawCount, 1u);
+        transparentCommands[outSlot].indexCount = inst.indexCount;
+        transparentCommands[outSlot].instanceCount = 1u;
+        transparentCommands[outSlot].firstIndex = inst.firstIndex;
+        transparentCommands[outSlot].vertexOffset = inst.vertexOffset;
+        transparentCommands[outSlot].firstInstance = idx;
+    }
+    else
+    {
+        uint outSlot = atomicAdd(opaqueDrawCount, 1u);
+        opaqueCommands[outSlot].indexCount = inst.indexCount;
+        opaqueCommands[outSlot].instanceCount = 1u;
+        opaqueCommands[outSlot].firstIndex = inst.firstIndex;
+        opaqueCommands[outSlot].vertexOffset = inst.vertexOffset;
+        opaqueCommands[outSlot].firstInstance = idx;
+    }
+}

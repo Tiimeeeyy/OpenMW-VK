@@ -1,0 +1,3 @@
+[submodule "example-suite"]
+	path = example-suite
+	url = https://gitlab.com/OpenMW/example-suite.git
